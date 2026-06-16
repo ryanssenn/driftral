@@ -1,6 +1,85 @@
 #include <math.h>
 #include "../../../include/kernels.h"
 
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
+static float dot_f32(const float* a, const float* b, size_t n) {
+#if defined(__ARM_NEON)
+    float32x4_t sum = vdupq_n_f32(0.f);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t va = vld1q_f32(a + i);
+        float32x4_t vb = vld1q_f32(b + i);
+        sum = vfmaq_f32(sum, va, vb);
+    }
+    float result = vaddvq_f32(sum);
+    for (; i < n; i++) {
+        result += a[i] * b[i];
+    }
+    return result;
+#elif defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        sum = _mm256_fmadd_ps(va, vb, sum);
+    }
+    __m128 lo = _mm256_castps256_ps128(sum);
+    __m128 hi = _mm256_extractf128_ps(sum, 1);
+    __m128 sum128 = _mm_add_ps(lo, hi);
+    __m128 shuf = _mm_movehdup_ps(sum128);
+    __m128 sums = _mm_add_ps(sum128, shuf);
+    shuf = _mm_movehl_ps(shuf, sums);
+    sums = _mm_add_ss(sums, shuf);
+    float result = _mm_cvtss_f32(sums);
+    for (; i < n; i++) {
+        result += a[i] * b[i];
+    }
+    return result;
+#else
+    float result = 0.f;
+    for (size_t i = 0; i < n; i++) {
+        result += a[i] * b[i];
+    }
+    return result;
+#endif
+}
+
+static float dot_i8_f32(const int8_t* w, const float* x, size_t n) {
+#if defined(__ARM_NEON)
+    float32x4_t acc = vdupq_n_f32(0.f);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        int8x8_t wi = vld1_s8(w + i);
+        int16x8_t w16 = vmovl_s8(wi);
+        float32x4_t wf_lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(w16)));
+        float32x4_t wf_hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(w16)));
+        float32x4_t xf_lo = vld1q_f32(x + i);
+        float32x4_t xf_hi = vld1q_f32(x + i + 4);
+        acc = vfmaq_f32(acc, wf_lo, xf_lo);
+        acc = vfmaq_f32(acc, wf_hi, xf_hi);
+    }
+    float result = vaddvq_f32(acc);
+    for (; i < n; i++) {
+        result += w[i] * x[i];
+    }
+    return result;
+#else
+    float result = 0.f;
+    for (size_t i = 0; i < n; i++) {
+        result += w[i] * x[i];
+    }
+    return result;
+#endif
+}
+
 
 // W (n,d) @ x (d,) = xout (n,)
 void matmul(Tensor<float>& xout, Tensor<float>& w, Tensor<float>& x){
@@ -10,11 +89,8 @@ void matmul(Tensor<float>& xout, Tensor<float>& w, Tensor<float>& x){
     assert(x.numel == d && xout.numel >= n && "matmul shape mismatch");
 
     #pragma omp parallel for
-    for (int i=0; i<n; i++){
-        xout.data[i] = 0;
-        for (int j=0; j<d; j++){
-            xout.data[i] += w.data[i*d+j] * x.data[j];
-        }
+    for (int i=0; i<(int)n; i++){
+        xout.data[i] = dot_f32(w.data + i * d, x.data, d);
     }
 }
 
@@ -24,52 +100,32 @@ void matmul(Tensor<float>& xout, Tensor<int8_t>& w, Tensor<float>& x){
 
     assert(x.numel == d && xout.numel >= n && "matmul shape mismatch");
 
-    // Group size for quantization (64 elements per scale)
     constexpr size_t GROUP_SIZE = 64;
     const size_t num_groups = d / GROUP_SIZE;
-    
+    const size_t nscales = w.scales.size();
+    const size_t numel = w.numel;
+
     #pragma omp parallel for
-    for (int i=0; i<n; i++){
+    for (int i=0; i<(int)n; i++){
         float sum = 0.0f;
         size_t w_offset = i * d;
-        
-        // Process each group (64 elements share the same scale)
+
         for (size_t g=0; g<num_groups; g++){
             size_t group_start = g * GROUP_SIZE;
-            size_t scale_idx = (w.scales.size() * (w_offset + group_start)) / w.numel;
-            float scale = w.scales[scale_idx];
-            
-            // Direct dequantization: w.data[i] / scale (avoiding w.get() overhead)
-            // Unroll loop for better performance
-            float inv_scale = 1.0f / scale;
-            size_t j = group_start;
-            size_t group_end = group_start + GROUP_SIZE;
-            if (group_end > d) group_end = d;
-            
-            // Process 4 elements at a time for better instruction-level parallelism
-            for (; j + 4 <= group_end; j += 4){
-                float dequant0 = w.data[w_offset + j] * inv_scale;
-                float dequant1 = w.data[w_offset + j + 1] * inv_scale;
-                float dequant2 = w.data[w_offset + j + 2] * inv_scale;
-                float dequant3 = w.data[w_offset + j + 3] * inv_scale;
-                sum += dequant0 * x.data[j] + dequant1 * x.data[j + 1] + 
-                       dequant2 * x.data[j + 2] + dequant3 * x.data[j + 3];
-            }
-            
-            // Handle remaining elements
-            for (; j < group_end; j++){
-                float dequant = w.data[w_offset + j] * inv_scale;
-                sum += dequant * x.data[j];
-            }
+            size_t scale_idx = (nscales * (w_offset + group_start)) / numel;
+            float inv_scale = 1.0f / w.scales[scale_idx];
+            sum += inv_scale * dot_i8_f32(
+                w.data + w_offset + group_start,
+                x.data + group_start,
+                GROUP_SIZE
+            );
         }
-        
-        // Handle remaining elements if d is not a multiple of GROUP_SIZE
+
         size_t remaining_start = num_groups * GROUP_SIZE;
         for (size_t j = remaining_start; j < d; j++){
-            // Need to get scale for this element
             sum += w.get(w_offset + j) * x.data[j];
         }
-        
+
         xout.data[i] = sum;
     }
 }
@@ -82,11 +138,13 @@ void row_matmul(Tensor<float>& xout, Tensor<float>& x, Tensor<float>& w){
 
     assert(x.shape[0] == n && xout.numel >= d && "matmul shape mismatch");
 
-    for (int i=0; i<d; i++){
-        xout.data[i] = 0;
-        for (int j=0; j<n; j++){
-            xout.data[i] += w.data[j*d+i] * x.data[j];
+    #pragma omp parallel for
+    for (int i=0; i<(int)d; i++){
+        float sum = 0.f;
+        for (size_t j=0; j<n; j++){
+            sum += w.data[j * d + i] * x.data[j];
         }
+        xout.data[i] = sum;
     }
 }
 
@@ -189,8 +247,5 @@ void sqrt(Tensor<float>& xout, Tensor<float>& x){
         xout.data[i] = sqrt(x.data[i]);
     }
 }
-
-
-
 
 

@@ -66,6 +66,7 @@ void Attention::forward(InferenceState &infer) {
     // Perform attention with tokens in window
     // softmax ( QK^t / sqrt(head_dim) ) * V
     // Reuse each KV head 4 times
+    #pragma omp parallel for
     for (size_t h=0; h<infer.config.n_heads; h++){
         // [seq_len, 128] @ [128]
         Tensor q_head = infer.q_state.at({h}); // [128]

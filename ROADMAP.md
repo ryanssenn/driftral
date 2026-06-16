@@ -54,10 +54,10 @@ The architecture *(src/model/mistral/modules.cpp)* is broken into independent C+
 - [x] Q8_K Per-group symmetric quantization - split tensor into groups, for each group, finds max abs value, computes scale and produces quantized weights
 
 ### CPU Multithreading
-- [ ] Todo
+- [x] OpenMP parallel matmul rows, attention heads, and row_matmul
 
 ### SIMD
-- [ ] Todo
+- [x] NEON (Apple Silicon) and AVX2 (x86) dot products for f32 and int8 matmul
 
 ### Custom CUDA Kernels
 - [ ] Todo
