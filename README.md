@@ -14,6 +14,14 @@ Independent project, not affiliated with Mistral AI.
 
 # Running
 
+| | Minimum |
+|---|---|
+| RAM | 16 GiB |
+| Disk | 40 GiB |
+| Python | 3.10+ |
+| CMake | 3.20+ |
+| Compiler | C++17 (gcc 11+ or clang) |
+
 These commands assume the Mistral Hugging Face checkout and this repo are sibling directories:
 
 ```text

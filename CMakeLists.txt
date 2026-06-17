@@ -28,4 +28,5 @@ add_executable(test_exec ${SRC} ${TEST_MISTRAL})
 
 if(NOT APPLE)
     target_link_libraries(mistral.cpp PRIVATE OpenMP::OpenMP_CXX)
+    target_link_libraries(test_exec PRIVATE OpenMP::OpenMP_CXX)
 endif()
