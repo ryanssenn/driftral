@@ -1,10 +1,12 @@
 # mistral.cpp
 
-From-scratch C++ implementation of [Mistral 7B](https://huggingface.co/mistralai/Mistral-7B-v0.1) on CPU. It runs local text completion with its own tensors, quantized weight loader, BPE tokenizer, manual memory management with KV caching, and the full decoder architecture.
+From-scratch C++ implementation of [Mistral 7B](https://huggingface.co/mistralai/Mistral-7B-v0.1) for CPU inference. Implements custom tensor operations, a quantized weight loader, BPE tokenization, KV caching, and the full decoder architecture for local text generation.
 
-Educational project, meant for understanding how inference works by reading the code, not as a production inference engine.
+Educational project for understanding LLM inference, not a production inference engine.
 
-Independent project; not affiliated with Mistral AI.
+Current status: int8 inference runs at ~4.6 tok/s on an Apple M4 with greedy decoding (--temp 0). The quantized path still exhibits numerical drift, and only the base Mistral 7B model is currently supported, so output quality, long generations, and instruction following remain a work in progress.
+
+Independent project, not affiliated with Mistral AI.
 
 <br>
 
@@ -134,7 +136,7 @@ cmake --build build --target test_exec
 ./build/test_exec
 ```
 
-Tests are filtered by the quantization mode in `mistral.bin`. Golden values come from Hugging Face f32 weights. int8 runs component tests plus logits/layer-stack diagnostics (these fail when int8 drift breaks generation). Re-export with `--quant f32` to run the full 19-test component suite.
+Tests are filtered by the quantization mode in `mistral.bin`. Golden values come from Hugging Face f32 weights. int8 runs component tests plus logits/layer-stack diagnostics (these fail when int8 drift breaks generation). The project is still dealing with numerical drift in the quantized path, so int8 output quality and long generations should be treated as work in progress. Re-export with `--quant f32` to run the full 19-test component suite.
 
 The runner prints a report (green checks on pass, red on fail) with per-test timing.
 
