@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore mistral.mog
+        uses: actions/cache/restore@v4
+        with:
+          path: mistral.mog
+          key: mog-${{ hashFiles('export_mistral.py', 'requirements.txt') }}
+          restore-keys: |
+            mog-
+
+      - name: Require cached model
+        run: |
+          if [ ! -f mistral.mog ]; then
+            echo "::error::mistral.mog not in Actions cache."
+            echo "Run the 'Warm model cache' workflow from the Actions tab (once per export change)."
+            exit 1
+          fi
+          echo "Using cached model ($(du -h mistral.mog | cut -f1))"
+
+      - name: Install OpenMP
+        run: brew install libomp
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Unit tests
+        run: ./build/test_exec
