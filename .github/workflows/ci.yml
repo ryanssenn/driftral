@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache mistral.mog
+        id: mog-cache
+        uses: actions/cache@v4
+        with:
+          path: mistral.mog
+          key: mog-${{ hashFiles('export_mistral.py', 'requirements.txt') }}
+
+      - name: Install OpenMP
+        run: brew install libomp
+
+      - name: Prepare model
+        if: steps.mog-cache.outputs.cache-hit != 'true'
+        run: bash scripts/ci/prepare_model.sh
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Unit tests
+        run: ./build/test_exec

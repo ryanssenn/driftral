@@ -1,0 +1,34 @@
+name: Perplexity
+
+on:
+  workflow_dispatch:
+
+jobs:
+  perplexity:
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache mistral.mog
+        id: mog-cache
+        uses: actions/cache@v4
+        with:
+          path: mistral.mog
+          key: mog-${{ hashFiles('export_mistral.py', 'requirements.txt') }}
+
+      - name: Install OpenMP
+        run: brew install libomp
+
+      - name: Prepare model
+        if: steps.mog-cache.outputs.cache-hit != 'true'
+        run: bash scripts/ci/prepare_model.sh
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Q8F16 perplexity check
+        run: ./perplexity.sh --check

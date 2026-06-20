@@ -9,6 +9,7 @@
 #
 # Usage:
 #   ./perplexity.sh [prompt]     # default prompt: scripts/perplexity_prompt.txt
+#   ./perplexity.sh --check      # CI gate: engine PPL only, exit 1 on regression
 #   ./perplexity.sh --hf [...]   # force-recompute the HF fp32 reference
 #   ./perplexity.sh --save [...] # record current numbers as the new baseline
 #   ./perplexity.sh --help
@@ -16,6 +17,7 @@
 # Env overrides:
 #   MODEL_MOG   engine model file (default: ./mistral.mog)
 #   PYTHON      python interpreter for the HF script (default: python3)
+#   PPL_ATOL    max allowed PPL increase for --check (default: 0.001)
 
 set -euo pipefail
 
@@ -28,17 +30,20 @@ PYTHON="${PYTHON:-python3}"
 HF_SCRIPT="scripts/test/mistral/perplexity.py"
 PROMPT_FILE="scripts/perplexity_prompt.txt"
 BASELINE="perplexity_baseline.json"
+PPL_ATOL="${PPL_ATOL:-0.001}"
 
 force_hf=0
 save_baseline=0
+check_only=0
 prompt=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --hf) force_hf=1 ;;
         --save) save_baseline=1 ;;
+        --check) check_only=1 ;;
         -h|--help)
-            sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '3,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) prompt="$1" ;;
     esac
@@ -69,13 +74,52 @@ base_q8f16="$(json_get q8f16_ppl)"
 if [ -z "$base_q8f16" ]; then
     base_q8f16="$(json_get int8_ppl)"
 fi
+base_tokens="$(json_get tokens)"
+
+# --- Q8F16 engine perplexity -----------------------------------------------
+echo "Computing Q8F16 engine perplexity..."
+eng_out="$("$ENGINE" "$MODEL_MOG" "$prompt" --ppl)"
+q8f16_ppl="$(printf '%s\n' "$eng_out" | grep -E '^perplexity:' | awk '{print $2}')"
+q8f16_tokens="$(printf '%s\n' "$eng_out" | grep -E '^tokens:' | awk '{print $2}')"
+[ -n "$q8f16_ppl" ] || { echo "Failed to parse engine perplexity from:" >&2; echo "$eng_out" >&2; exit 1; }
+
+if [ "$check_only" -eq 1 ]; then
+    echo "Q8F16 PPL: $q8f16_ppl  tokens: $q8f16_tokens  prompt sha: ${prompt_sha:0:12}"
+
+    if [ -z "$base_q8f16" ]; then
+        echo "ERROR: no q8f16_ppl in $BASELINE" >&2
+        exit 1
+    fi
+    if [ "$base_sha" != "$prompt_sha" ]; then
+        echo "ERROR: prompt_sha mismatch (baseline ${base_sha:0:12}, got ${prompt_sha:0:12})" >&2
+        exit 1
+    fi
+    if [ -n "$base_tokens" ] && [ "$base_tokens" != "$q8f16_tokens" ]; then
+        echo "ERROR: token count mismatch (baseline $base_tokens, got $q8f16_tokens)" >&2
+        exit 1
+    fi
+
+    awk -v cur="$q8f16_ppl" -v base="$base_q8f16" -v atol="$PPL_ATOL" 'BEGIN {
+        delta = cur - base;
+        if (delta > atol) {
+            printf "REGRESSED: delta=%+.4f (max allowed +%.4f)\n", delta, atol;
+            exit 1;
+        }
+        if (delta < -0.01) {
+            printf "IMPROVED: delta=%+.4f — consider ./perplexity.sh --save\n", delta;
+        } else {
+            printf "OK: delta=%+.4f (baseline %.5f)\n", delta, base;
+        }
+    }'
+    exit $?
+fi
 
 # --- HF fp32 reference (cached unless forced / prompt changed) ---------------
 hf_ppl=""
 hf_tokens=""
 if [ "$force_hf" -eq 0 ] && [ -n "$base_hf" ] && [ "$base_sha" = "$prompt_sha" ]; then
     hf_ppl="$base_hf"
-    hf_tokens="$(json_get tokens)"
+    hf_tokens="$base_tokens"
     echo "HF reference perplexity: $hf_ppl (cached)"
 else
     echo "Computing HF reference perplexity (this is slow)..."
@@ -85,13 +129,6 @@ else
     [ -n "$hf_ppl" ] || { echo "Failed to parse HF perplexity from:" >&2; echo "$hf_out" >&2; exit 1; }
     echo "HF fp32 perplexity: $hf_ppl"
 fi
-
-# --- Q8F16 engine perplexity (fast path) -------------------------------------
-echo "Computing Q8F16 engine perplexity..."
-eng_out="$("$ENGINE" "$MODEL_MOG" "$prompt" --ppl)"
-q8f16_ppl="$(printf '%s\n' "$eng_out" | grep -E '^perplexity:' | awk '{print $2}')"
-q8f16_tokens="$(printf '%s\n' "$eng_out" | grep -E '^tokens:' | awk '{print $2}')"
-[ -n "$q8f16_ppl" ] || { echo "Failed to parse engine perplexity from:" >&2; echo "$eng_out" >&2; exit 1; }
 
 # --- Report -------------------------------------------------------------------
 echo
