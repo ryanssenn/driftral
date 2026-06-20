@@ -53,7 +53,9 @@ Use `--temp 0` for greedy decoding.
 
 Perplexity is the main correctness check. `./perplexity.sh` runs the engine against a Hugging Face reference on a fixed prompt. Regenerate unit-test goldens with `python scripts/test/mistral/goldens.py`.
 
-**CI:** every push/PR runs `./build/test_exec` on macOS (uses a cached `mistral.mog`; re-exports only when `export_mistral.py` changes). **Manual perplexity:** trigger the *Perplexity* workflow in GitHub Actions, or run `./perplexity.sh --check` locally.
+**CI:** every push/PR runs `./build/test_exec` on macOS (~2–5 min) using a cached `mistral.mog`. The cache is populated manually via the **Warm model cache** workflow (Actions tab); PR CI never downloads the 14 GB checkpoint.
+
+**Manual workflows:** *Warm model cache* (once after export changes), *Perplexity* (Q8F16 regression check).
 
 ```bash
 ./perplexity.sh

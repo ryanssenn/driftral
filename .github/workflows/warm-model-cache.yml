@@ -1,0 +1,55 @@
+name: Warm model cache
+
+# One-time (or after export_mistral.py changes): download HF checkpoint,
+# export Q8F16 mistral.mog, and save to Actions cache. PR CI restores
+# from cache only — it does not download the model.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  warm:
+    runs-on: macos-14
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore HF checkpoint cache
+        uses: actions/cache/restore@v4
+        with:
+          path: Mistral-7B-v0.1
+          key: hf-mistral-7b-v0.1
+
+      - name: Restore mistral.mog cache
+        id: mog-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: mistral.mog
+          key: mog-${{ hashFiles('export_mistral.py', 'requirements.txt') }}
+
+      - name: Install OpenMP
+        run: brew install libomp
+
+      - name: Build export dependencies
+        if: steps.mog-restore.outputs.cache-hit != 'true'
+        run: bash scripts/ci/prepare_model.sh
+
+      - name: Save HF checkpoint cache
+        if: steps.mog-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: Mistral-7B-v0.1
+          key: hf-mistral-7b-v0.1
+
+      - name: Save mistral.mog cache
+        if: steps.mog-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: mistral.mog
+          key: mog-${{ hashFiles('export_mistral.py', 'requirements.txt') }}
+
+      - name: Verify
+        run: |
+          ls -lh mistral.mog
+          echo "Cache warm. PR CI will restore mistral.mog (~2-5 min per run)."
