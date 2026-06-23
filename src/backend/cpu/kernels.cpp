@@ -1,4 +1,7 @@
+#include <algorithm>
+#include <cmath>
 #include <math.h>
+#include <vector>
 #include "kernels.h"
 
 #if defined(__ARM_NEON)
@@ -137,9 +140,86 @@ void matmul(Tensor<AccumT>& xout, Tensor<WeightT>& w, Tensor<ActivationT>& x) {
     }
 }
 
+template <>
+void matmul<int8_t, float, float>(Tensor<float>& xout, Tensor<int8_t>& w, Tensor<float>& x) {
+    size_t n = w.shape[0];
+    size_t d = w.shape[1];
+
+    assert(x.numel == d && xout.numel >= n && "matmul shape mismatch");
+
+#if defined(__ARM_NEON) && defined(__ARM_FEATURE_DOTPROD)
+    constexpr size_t GROUP_SIZE = 64;
+    const size_t num_groups = d / GROUP_SIZE;
+    const size_t nscales = w.scales.size();
+    const size_t numel = w.numel;
+
+    std::vector<int8_t> xq(d);
+    std::vector<float> x_scales(num_groups, 1.f);
+
+    for (size_t g = 0; g < num_groups; g++) {
+        const size_t group_start = g * GROUP_SIZE;
+        float max_abs = 0.f;
+        for (size_t j = 0; j < GROUP_SIZE; j++) {
+            max_abs = std::max(max_abs, std::fabs(x.data[group_start + j]));
+        }
+
+        if (max_abs == 0.f) {
+            continue;
+        }
+
+        const float x_scale = 127.f / max_abs;
+        x_scales[g] = x_scale;
+        for (size_t j = 0; j < GROUP_SIZE; j++) {
+            int q = static_cast<int>(std::round(x.data[group_start + j] * x_scale));
+            q = std::max(-127, std::min(127, q));
+            xq[group_start + j] = static_cast<int8_t>(q);
+        }
+    }
+
+    #pragma omp parallel for
+    for (int row = 0; row < static_cast<int>(n); row++) {
+        const size_t w_offset = static_cast<size_t>(row) * d;
+        float sum = 0.f;
+
+        for (size_t g = 0; g < num_groups; g++) {
+            const size_t group_start = g * GROUP_SIZE;
+            const size_t scale_idx = (nscales * (w_offset + group_start)) / numel;
+            const float dequant_scale = 1.f / (w.scales[scale_idx] * x_scales[g]);
+            const int8_t* group_w = w.data + w_offset + group_start;
+            const int8_t* group_x = xq.data() + group_start;
+
+            int32x4_t acc = vdupq_n_s32(0);
+            size_t j = 0;
+            for (; j + 16 <= GROUP_SIZE; j += 16) {
+                int8x16_t wi = vld1q_s8(group_w + j);
+                int8x16_t xi = vld1q_s8(group_x + j);
+                acc = vdotq_s32(acc, wi, xi);
+            }
+
+            int32_t group_sum = vaddvq_s32(acc);
+            for (; j < GROUP_SIZE; j++) {
+                group_sum += static_cast<int32_t>(group_w[j]) * static_cast<int32_t>(group_x[j]);
+            }
+
+            sum += dequant_scale * static_cast<float>(group_sum);
+        }
+
+        const size_t remaining_start = num_groups * GROUP_SIZE;
+        for (size_t j = remaining_start; j < d; j++) {
+            sum += w.get(w_offset + j) * x.data[j];
+        }
+
+        xout.data[row] = sum;
+    }
+#else
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(n); i++) {
+        xout.data[i] = dot_product<int8_t, float, float>(w, static_cast<size_t>(i), x, d);
+    }
+#endif
+}
 
 template void matmul<float, float, float>(Tensor<float>&, Tensor<float>&, Tensor<float>&);
-template void matmul<int8_t, float, float>(Tensor<float>&, Tensor<int8_t>&, Tensor<float>&);
 template void matmul<fp16_t, float, float>(Tensor<float>&, Tensor<fp16_t>&, Tensor<float>&);
 
 
